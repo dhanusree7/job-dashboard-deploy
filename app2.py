@@ -1,235 +1,550 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
+import plotly.express as px
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
+import numpy as np
 
-# -------------------------
-# Load Data
-# -------------------------
-df = pd.read_csv('data job posts.csv', encoding='utf-8')
+# Inject CSS to remove max-width and make dark mode cover full page
+st.markdown("""
+    <style>
+        /* Make the main container use full width */
+        .block-container {
+            max-width: 100% !important;
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
 
-print("Initial data shape:", df.shape)
-print("Columns:", df.columns.tolist())
+        /* Dark mode full background */
+        body {
+            background-color: black !important;
+        }
 
-# -------------------------
-# Drop Unwanted Columns
-# -------------------------
-drop_cols = ["AnnouncementCode", "Eligibility", "Audience", "StartDate", "Duration", "ApplicationP", "Attach", "Notes"]
-df.drop(columns=drop_cols, inplace=True)
+        /* Make Plotly charts fit full width */
+        .stPlotlyChart {
+            width: 100% !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-# -------------------------
-# Handle Deadline Column
-# -------------------------
-df['Deadline'] = pd.to_datetime(df['Deadline'], errors='coerce')
-df = df.dropna(subset=['Deadline']).reset_index(drop=True)
 
-# -------------------------
-# Handle Missing Values for Important Columns
-# -------------------------
-fill_values = {
-    "Title": "Not Specified",
-    "Company": "Unknown Company",
-    "Term": "Not Specified",
-    "Location": "Unknown Location",
-    "JobDescription": "",
-    "JobRequirment": "",
-    "RequiredQual": "Not Specified",
-    "Salary": "Not Disclosed",
-    "OpeningDate": pd.NaT,
-    "AboutC": "Not Provided"
-}
-df.fillna(value=fill_values, inplace=True)
+@st.cache_data
+def load_data():
+    return pd.read_csv('cleaned_jobposts.csv', encoding='utf-8')
 
-# Convert OpeningDate to datetime, fill missing with min date
-df["OpeningDate"] = pd.to_datetime(df["OpeningDate"], errors="coerce")
-min_date = df["OpeningDate"].min()
-df["OpeningDate"].fillna(min_date, inplace=True)
-df["Year"] = df["OpeningDate"].dt.year
-df["Month"] = df["OpeningDate"].dt.month
+df = load_data()
 
-# -------------------------
-# Salary Cleaning Functions
-# -------------------------
-def clean_salary(salary):
-    """Extract numeric salary from salary string."""
-    if pd.isnull(salary):
+def clean_salary(val):
+    if pd.isnull(val):
         return np.nan
-    salary = str(salary).lower()
-    if 'not disclosed' in salary or 'competitive' in salary or salary.strip() == '':
-        return np.nan
-    
-    match = re.search(r'(\d+[,.]?\d*)', salary.replace(',', ''))
-    if match:
-        try:
-            val = float(match.group(1))
-            if val < 1000:
-                val *= 1000  # scale up small numbers
-            return val
-        except:
-            return np.nan
-    else:
+    val = str(val)
+
+    # Extract all numbers (handle ranges like "50,000 - 70,000")
+    numbers = re.findall(r'[\d,]+', val)
+    if not numbers:
         return np.nan
 
-def extract_currency(salary):
-    """Extract currency code from salary string."""
-    if pd.isnull(salary):
-        return "Unknown"
-    salary = str(salary).upper()
-    if "AMD" in salary:
-        return "AMD"
-    elif "USD" in salary:
-        return "USD"
-    elif "EURO" in salary or "EUR" in salary:
-        return "Euro"
-    elif "INR" in salary or "₹" in salary:
-        return "INR"
-    else:
-        return "Other/Unknown"
-
-df['Salary_clean'] = df['Salary'].apply(clean_salary)
-df['Salary_Currency'] = df['Salary'].apply(extract_currency)
-
-# Filter for known currency salaries (for stats & charts)
-salary_known = df[df['Salary_Currency'] != 'Other/Unknown']
-
-# -------------------------
-# Job Term Cleaning Function
-# -------------------------
-def clean_job_term(term):
-    """Standardize job term categories."""
-    if not isinstance(term, str):
-        return np.nan
-    
-    term_lower = term.lower()
-
-    full_time_keywords = ['full time', 'full-time', 'fulltime', 'full term', 'full-term']
-    part_time_keywords = ['part time', 'part-time', 'parttime']
-    contract_keywords = ['contract', 'fixed term', 'term appointment', 'renewable term', 'fixed-term', 'termless']
-    freelance_keywords = ['freelance', 'free lance']
-    temporary_keywords = ['temporary', 'temp']
-    internship_keywords = ['intern', 'internship']
-    shift_keywords = ['shift', 'night', 'morning', 'afternoon', 'day shift']
-    flexible_keywords = ['flexible', 'flex time', 'free schedule', 'flexible hours']
-    permanent_keywords = ['permanent', 'indefinite', 'open ended', 'long term', 'long-term']
-
-    if any(k in term_lower for k in full_time_keywords):
-        return 'Full-time'
-    if any(k in term_lower for k in part_time_keywords):
-        return 'Part-time'
-    if any(k in term_lower for k in contract_keywords):
-        return 'Contract'
-    if any(k in term_lower for k in freelance_keywords):
-        return 'Freelance'
-    if any(k in term_lower for k in temporary_keywords):
-        return 'Temporary'
-    if any(k in term_lower for k in internship_keywords):
-        return 'Internship'
-    if any(k in term_lower for k in shift_keywords):
-        return 'Shift-based'
-    if any(k in term_lower for k in flexible_keywords):
-        return 'Flexible'
-    if any(k in term_lower for k in permanent_keywords):
-        return 'Permanent'
-
-    # Patterns for hours/days per week
-    hours_week_match = re.search(r'(\d{1,2})\s*(hours|hrs|h)\s*(per week|weekly|week)', term_lower)
-    if hours_week_match:
-        hours = int(hours_week_match.group(1))
-        if hours >= 35:
-            return 'Full-time'
-        elif hours >= 15:
-            return 'Part-time'
+    try:
+        # Convert all to float after removing commas
+        numbers = [float(num.replace(',', '')) for num in numbers]
+        if len(numbers) == 1:
+            return numbers[0]
         else:
-            return 'Flexible'
+            return sum(numbers) / len(numbers)  # take average of range
+    except:
+        return np.nan
 
-    days_week_match = re.search(r'(\d{1,2})\s*(days|day)\s*(per week|weekly|week)', term_lower)
-    if days_week_match:
-        days = int(days_week_match.group(1))
-        if days >= 5:
-            return 'Full-time'
-        elif days >= 2:
-            return 'Part-time'
-        else:
-            return 'Flexible'
+df['Salary_Cleaned'] = df['Salary'].apply(clean_salary)
+average_salary = round(df['Salary_Cleaned'].dropna().mean(), 2)
 
-    contract_duration_match = re.search(r'(\d{1,2})\s*(months|month|years|year)', term_lower)
-    if contract_duration_match:
-        return 'Contract'
+# Dark mode toggle
+dark_mode = st.checkbox("Dark Mode")
 
-    unspecified_keywords = ['not specified', 'non-specified', 'unspecified', 'asap', 'according to', 'immediately']
-    if any(k in term_lower for k in unspecified_keywords):
-        return 'Other/Unspecified'
-    
-    return 'Other/Unspecified'
+# Apply styles based on theme
+if dark_mode:
+    st.markdown("""
+    <style>
+    html, body, .main { background-color: #121212 !important; color: #f0f0f0 !important; }
+    .block-container { background-color: #121212 !important; }
+    h1, h2, h3, .stMetricValue, .stMetricLabel, label, p { color: #f0f0f0 !important; }
+    .stCheckbox > label { color: white !important; font-weight: 600; font-size: 16px; }
+    .stMetric {
+        background-color: #1e1e1e;
+        padding: 15px;
+        border-radius: 12px;
+        text-align: center;
+    }
+    .stMetricValue, .stMetricLabel {
+        color: #f0f0f0 !important;
+        font-weight: 600;
+    }
+    .stCheckbox > label {
+        color: white !important;
+        font-weight: 600;
+        font-size: 16px;
+    }
+    div[data-testid="stMetricValue"] {
+        color: white !important;
+        font-weight: 700;
+        font-size: 22px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <style>
+    html, body, .main { background-color: white !important; color: black !important; }
+    .block-container { background-color: white !important; }
+    h1, h2, h3, .stMetricValue, .stMetricLabel, label, p { color: black !important; }
+    .stCheckbox > label { color: black !important; font-weight: 600; font-size: 16px; }
+    .stMetric {
+    background-color: #f2f2f2; /* Light gray card background */
+    padding: 15px;
+    border-radius: 12px;
+    text-align: center;
+    }
+    .stMetricValue, .stMetricLabel {
+    color: black !important;
+    font-weight: 600;
+    }
+    div[data-testid="stMetricValue"] {
+    color: black !important;
+    font-weight: 700;
+    font-size: 22px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-df['Term_Clean_v2'] = df['Term'].apply(clean_job_term)
+# --- ROW 1: Title and KPIs ---
+# --- ROW 1: Title and KPIs ---
+st.markdown("""
+<div style="display: flex; flex-direction: column; align-items: center;">
+    <h1>Job Posts Dashboard</h1>
+    <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 30px; margin-top: 10px;">
+""", unsafe_allow_html=True)
 
-# -------------------------
-# Clustering to Reclassify "Other/Unspecified"
-# -------------------------
-other_terms = df[df['Term_Clean_v2'] == 'Other/Unspecified']['Term'].dropna().unique()
-
-vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
-X = vectorizer.fit_transform(other_terms)
-
-num_clusters = 10
-kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-kmeans.fit(X)
-labels = kmeans.labels_
-
-clustered_terms = pd.DataFrame({'Term': other_terms, 'Cluster': labels})
-
-print("\n--- Terms grouped by cluster ---")
-for cluster_num in range(num_clusters):
-    print(f"\nCluster {cluster_num}:")
-    print(clustered_terms[clustered_terms['Cluster'] == cluster_num]['Term'].tolist())
-
-# Manual cluster to category mapping (adjust based on inspection)
-cluster_to_category = {
-    0: 'Other/Unspecified',
-    1: 'Shift-based',
-    2: 'Full-time / Part-time',
-    3: 'Full-time / Part-time',
-    4: 'Shift-based',
-    5: 'Flexible',
-    6: 'Flexible',
-    7: 'Contract',
-    8: 'Contract',
-    9: 'Shift-based'
-}
-
-term_to_category = dict(zip(clustered_terms['Term'], clustered_terms['Cluster'].map(cluster_to_category)))
-
-def final_term_category(term, original_cat):
-    if original_cat != 'Other/Unspecified':
-        return original_cat
-    return term_to_category.get(term, 'Other/Unspecified')
-
-df['Term_Clean_Final'] = df.apply(lambda row: final_term_category(row['Term'], row['Term_Clean_v2']), axis=1)
-
-print("\nFinal Term Distribution:")
-print(df['Term_Clean_Final'].value_counts())
-
-# -------------------------
-# KPIs and Summary Stats
-# -------------------------
-total_jobs = len(df)
+# Compute KPIs
+total_posts = len(df)
 unique_titles = df['Title'].nunique()
 unique_companies = df['Company'].nunique()
-term_counts = df['Term_Clean_Final'].value_counts()
-top_locations = df['Location'].value_counts().head(10)
-avg_salary_currency = salary_known.groupby('Salary_Currency')['Salary_clean'].mean()
+top_skill = df['Skill_Cleaned'].explode().value_counts().idxmax() if 'Skill_Cleaned' in df.columns else "N/A"
+top_category = df['Category'].value_counts().idxmax() if 'Category' in df.columns else "N/A"
 
-print(f"\nTotal job posts: {total_jobs}")
-print(f"Unique job titles: {unique_titles}")
-print(f"Unique companies: {unique_companies}")
-print("\nJob term distribution:")
-print(term_counts)
-print("\nTop 10 locations by job count:")
-print(top_locations)
-print("\nAverage salary by currency:")
-print(avg_salary_currency)
+# KPI display
+c1, c2 = st.columns(2)
+with c1:
+    st.metric("Total Job Posts", total_posts)
+    st.metric("Unique Companies", unique_companies)
 
-df.to_csv('cleaned_jobposts.csv', index=False)
-print("Cleaned data saved to cleaned_jobposts.csv")
+with c2:
+    st.metric("Unique Job Titles", unique_titles)
+    st.metric("Average Salary", f"${average_salary:,.2f}")
+
+
+st.markdown("</div></div>", unsafe_allow_html=True)
+
+# --- ROW 2: Charts in 2 columns ---
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.subheader("Top 5 Job Terms")
+    job_terms = df['Term_Clean_Final'].value_counts().head(5).reset_index()
+    job_terms.columns = ['Term', 'Count']
+    fig1 = px.bar(job_terms, x='Term', y='Count', title='Top 5 Job Terms')
+    fig1.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+    st.markdown("<div style='display: flex; justify-content: center;'>", unsafe_allow_html=True)
+    st.plotly_chart(fig1, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with col_right:
+    st.subheader("Top 5 Locations")
+    locations = df['Location'].value_counts().head(5).reset_index()
+    locations.columns = ['Location', 'Count']
+    fig2 = px.bar(locations, x='Location', y='Count', title='Top 5 Locations')
+    fig2.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+    st.markdown("<div style='display: flex; justify-content: center;'>", unsafe_allow_html=True)
+    st.plotly_chart(fig2, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==== ROW 3 ====
+col1, col2 = st.columns(2)
+
+# --- Chart 3: Category Distribution (Treemap) ---
+with col1:
+    st.subheader("📂 Category Distribution")
+    if 'Term_Clean_Final' in df.columns:
+        
+        # Remove unwanted categories
+        unwanted_categories = ["Others", "Unspecified", "Other/Unspecified", "", None]
+        filtered_df = df[~df['Term_Clean_Final'].isin(unwanted_categories)]
+
+        if not filtered_df.empty:
+            all_categories = sorted(filtered_df['Term_Clean_Final'].unique())
+
+            # Start with 'All Categories' as default
+            selected = st.multiselect(
+                "Select Job Categories",
+                options=["All Categories"] + all_categories,
+                default=["All Categories"]
+            )
+
+            # If 'All Categories' is selected, ignore other selections
+            if "All Categories" in selected:
+                chart_df = filtered_df
+            else:
+                chart_df = filtered_df[filtered_df['Term_Clean_Final'].isin(selected)]
+
+            if not chart_df.empty:
+                category_counts = chart_df['Term_Clean_Final'].value_counts().reset_index()
+                category_counts.columns = ['Category', 'Count']
+
+                fig_treemap = px.treemap(
+                    category_counts,
+                    path=['Category'],
+                    values='Count',
+                    title="Job Category Distribution",
+                    color='Count',
+                    color_continuous_scale='Viridis'
+                )
+                fig_treemap.update_layout(
+                    template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+                )
+                st.plotly_chart(fig_treemap, use_container_width=True)
+            else:
+                st.warning("No data available for the selected category.")
+        else:
+            st.warning("No valid categories found after filtering.")
+    else:
+        st.warning("`Term_Clean_Final` column not found in dataset.")
+
+
+# --- Chart 4: Hiring Pattern (Heatmap) ---
+with col2:
+    st.subheader("📅 Hiring Pattern")
+
+    possible_date_cols = [col for col in df.columns if 'date' in col.lower()]
+
+    if possible_date_cols:
+        date_col = possible_date_cols[0]
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+
+        # Extract month & day
+        df['Month'] = df[date_col].dt.month_name()
+        df['DayOfWeek'] = df[date_col].dt.day_name()
+
+        # Define quarters mapping
+        quarter_map = {
+            "Q1 (Jan-Mar)": ["January", "February", "March"],
+            "Q2 (Apr-Jun)": ["April", "May", "June"],
+            "Q3 (Jul-Sep)": ["July", "August", "September"],
+            "Q4 (Oct-Dec)": ["October", "November", "December"],
+            "All": ["January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"]
+        }
+
+        # Two dropdowns in same row
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            selected_quarter = st.selectbox("Select Quarter", list(quarter_map.keys()), index=len(quarter_map)-1)
+        with filter_col2:
+            selected_day = st.selectbox(
+                "Select Day",
+                ["All", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            )
+
+        # Apply filters
+        filtered_df = df[df['Month'].isin(quarter_map[selected_quarter])]
+        if selected_day != "All":
+            filtered_df = filtered_df[filtered_df['DayOfWeek'] == selected_day]
+
+        # Group for heatmap
+        heatmap_data = filtered_df.groupby(['DayOfWeek', 'Month']).size().reset_index(name='Job_Count')
+
+        # Order months & days
+        days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        months_order = ["January", "February", "March", "April", "May", "June",
+                        "July", "August", "September", "October", "November", "December"]
+
+        heatmap_data['DayOfWeek'] = pd.Categorical(heatmap_data['DayOfWeek'], categories=days_order, ordered=True)
+        heatmap_data['Month'] = pd.Categorical(heatmap_data['Month'], categories=months_order, ordered=True)
+
+        # Plot
+        fig_heatmap = px.density_heatmap(
+            heatmap_data,
+            x='Month',
+            y='DayOfWeek',
+            z='Job_Count',
+            color_continuous_scale='Viridis',
+            title=f"Hiring Pattern ({selected_quarter} - {selected_day})"
+        )
+        fig_heatmap.update_layout(
+            template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+        )
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+    else:
+        st.warning("No date column found in dataset.")
+col_left, col_right = st.columns(2)
+
+# Left Column - Job Postings Over Time
+with col_left:
+    st.subheader("📈 Job Postings Over Time")
+
+    possible_date_cols = [col for col in df.columns if 'date' in col.lower()]
+
+    if possible_date_cols:
+        date_col = possible_date_cols[0]
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col])
+
+        # Month-Year column
+        df['Month_Year'] = df[date_col].dt.to_period('M').astype(str)
+
+        # Group and sort
+        job_trend = df.groupby('Month_Year').size().reset_index(name='Job_Count')
+        job_trend['Month_Year'] = pd.to_datetime(job_trend['Month_Year'])
+        job_trend = job_trend.sort_values('Month_Year')
+
+        # Plot
+        fig_line = px.line(
+            job_trend,
+            x='Month_Year',
+            y='Job_Count',
+            title="Job Postings Trend",
+            markers=True
+        )
+        fig_line.update_layout(
+            margin=dict(l=0, r=0, t=30, b=0),
+            xaxis_title="Month-Year",
+            yaxis_title="Number of Job Postings",
+            template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+        )
+
+        st.markdown("<div style='display: flex; justify-content: center;'>", unsafe_allow_html=True)
+        st.plotly_chart(fig_line, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.warning("No date column found in dataset.")
+
+# Right Column - Placeholder for Salary Distribution or another chart
+with col_right:
+    st.subheader("💰 Salary Distribution")
+
+    possible_salary_cols = [col for col in df.columns if 'salary' in col.lower()]
+    
+    if possible_salary_cols:
+        salary_col = possible_salary_cols[0]
+
+        # Clean salary values
+        df[salary_col] = (
+            df[salary_col]
+            .astype(str)
+            .str.replace(r'[^0-9\.]', '', regex=True)
+        )
+        df[salary_col] = pd.to_numeric(df[salary_col], errors='coerce')
+
+        # Filter unrealistic salaries
+        df_salary = df[(df[salary_col] >= 100) & (df[salary_col] <= 1_000_000)]
+
+        if not df_salary.empty:
+            # Convert to thousands
+            df_salary[salary_col] = df_salary[salary_col] / 1000
+
+            # Histogram
+            fig_hist = px.histogram(
+                df_salary,
+                x=salary_col,
+                nbins=30,
+                title="Salary Distribution (Histogram, in Thousands)"
+            )
+            fig_hist.update_layout(
+                margin=dict(l=0, r=0, t=30, b=0),
+                xaxis_title="Salary (in thousands)",
+                yaxis_title="Count",
+                template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            
+
+        else:
+            st.warning("No valid salary data available after filtering.")
+    else:
+        st.warning("No salary column found in dataset.")
+col_left, col_right = st.columns(2)
+
+# Box Plot in left column
+with col_left:
+    st.subheader("💰 Salary Distribution (Box Plot, in Thousands)")
+
+    possible_salary_cols = [col for col in df.columns if 'salary' in col.lower()]
+    
+    if possible_salary_cols:
+        salary_col = possible_salary_cols[0]
+
+        # Clean salary values
+        df[salary_col] = (
+            df[salary_col]
+            .astype(str)
+            .str.replace(r'[^0-9\.]', '', regex=True)
+        )
+        df[salary_col] = pd.to_numeric(df[salary_col], errors='coerce')
+
+        # Filter unrealistic salaries
+        df_salary = df[(df[salary_col] >= 100) & (df[salary_col] <= 1_000_000)]
+
+        if not df_salary.empty:
+            # Convert to thousands
+            df_salary[salary_col] = df_salary[salary_col] / 1000
+
+       # Box Plot
+            fig_box = px.box(
+                df_salary,
+                y=salary_col,
+                title="Salary Distribution (Box Plot, in Thousands)"
+            )
+            fig_box.update_layout(
+                margin=dict(l=0, r=0, t=30, b=0),
+                yaxis_title="Salary (in thousands)",
+                template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+    else:
+        st.warning("No salary column found in dataset.")
+
+# Skill Demand Bar Chart in right column
+with col_right:
+    st.subheader("📊 Top Skills in Demand")
+
+    # Merge all relevant text columns into one
+    text_cols = ["JobDescription", "JobRequirment", "RequiredQual"]
+    for col in text_cols:
+        df[col] = df[col].astype(str)  # Ensure text type
+    df["all_skills_text"] = df[text_cols].agg(" ".join, axis=1)
+
+    # Define skill keywords to search for
+    skill_keywords = [
+        "Python", "Excel", "SQL", "Java", "JavaScript", "C++", "C#", "AWS", "Azure", 
+        "HTML", "CSS", "R", "Tableau", "Power BI", "Machine Learning", "Data Analysis", 
+        "Communication", "Leadership", "Project Management", "Git", "Django", "Flask"
+    ]
+
+    # Count occurrences
+    skill_counts = {}
+    for skill in skill_keywords:
+        count = df["all_skills_text"].str.contains(rf"\b{re.escape(skill)}\b", case=False, na=False).sum()
+        skill_counts[skill] = count
+
+    # Create DataFrame and get Top N
+    skill_df = pd.DataFrame(list(skill_counts.items()), columns=["Skill", "Count"])
+    skill_df = skill_df.sort_values(by="Count", ascending=False).head(10)
+
+    # Plot Bar Chart
+    fig = px.bar(
+        skill_df,
+        x="Skill",
+        y="Count",
+        title="Top 10 Skills in Job Postings",
+        text="Count"
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=30, b=0),
+        xaxis_title="Skill",
+        yaxis_title="Frequency",
+        template="plotly_dark" if st.session_state.get("dark_mode") else "plotly_white"
+    )
+
+    st.markdown("<div style='display: flex; justify-content: center;'>", unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    # IT vs Non-IT
+    st.subheader("💼 IT vs Non-IT Job Distribution")
+
+    if 'IT' in df.columns:
+        it_map = df['IT'].fillna(False).apply(
+            lambda x: 'IT' if str(x).strip().lower() in ['true', '1', 'yes'] else 'Non-IT'
+        )
+        it_counts = it_map.value_counts().reset_index()
+        it_counts.columns = ['Category', 'Count']
+
+        fig = px.pie(
+            it_counts, 
+            names='Category', 
+            values='Count', 
+            title='IT vs Non-IT Jobs',
+            hole=0.35
+        )
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=30, b=0), 
+            template="plotly_white"  # or "plotly_dark"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Column 'IT' not found in dataset.")
+
+with col_right:
+    st.subheader("📈 Salary Trends Bubble Chart")
+
+    # Drop missing salary values
+    df_bubble = df.dropna(subset=['Year', 'Salary_clean', 'Term_Clean_Final'])
+
+    # Aggregate job counts
+    agg_df = df_bubble.groupby(['Year', 'Term_Clean_Final']).agg(
+        avg_salary=('Salary_clean', 'mean'),
+        job_count=('jobpost', 'count')
+    ).reset_index()
+
+    fig_bubble = px.scatter(
+        agg_df,
+        x="Year",
+        y="avg_salary",
+        size="job_count",
+        color="Term_Clean_Final",
+        hover_name="Term_Clean_Final",
+        size_max=50,
+        title="Salary Trends by Job Term",
+    )
+
+    fig_bubble.update_layout(
+        margin=dict(l=0, r=0, t=30, b=0),
+        xaxis_title="Year",
+        yaxis_title="Average Salary",
+        template="plotly_white"
+    )
+
+    st.plotly_chart(fig_bubble, use_container_width=True)
+
+import plotly.express as px
+
+st.subheader("🌍 Location Insights")
+
+if 'Location' in df.columns:
+    # Count jobs per location
+    location_counts = df['Location'].value_counts().reset_index()
+    location_counts.columns = ['Location', 'Count']
+
+    # Choropleth Map with bright Turbo color scale
+    fig = px.choropleth(
+        location_counts,
+        locations="Location",
+        locationmode="country names",  # Works with country names directly
+        color="Count",
+        hover_name="Location",
+        color_continuous_scale="Turbo",  # Bright, high-contrast color scale
+        title="Job Postings by Location"
+    )
+
+    # Layout settings for responsiveness
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=30, b=0),
+        template="plotly_white",
+        coloraxis_colorbar=dict(title="Job Count")
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Column 'Location' not found in dataset.")
